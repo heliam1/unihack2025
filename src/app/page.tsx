@@ -19,317 +19,208 @@ export default function Home() {
   // Add debounce counters for each face
   const speakingCounters = useRef<Map<number, number>>(new Map());
   const notSpeakingCounters = useRef<Map<number, number>>(new Map());
-  
-  // Add zoom-related state
-  const [zoomEnabled, setZoomEnabled] = useState(true);
-  const currentZoomFace = useRef<number | null>(null);
-  const zoomTransition = useRef<{
-    progress: number;
-    targetX: number;
-    targetY: number;
-    targetScale: number;
-    startX: number;
-    startY: number;
-    startScale: number;
-  }>({
-    progress: 0,
-    targetX: 0,
-    targetY: 0,
-    targetScale: 1,
-    startX: 0,
-    startY: 0,
-    startScale: 1,
-  });
-  const facePositions = useRef<Map<number, {x: number, y: number, width: number, height: number}>>(new Map());
+  // Threshold for mouth movement to be considered speaking
+  const MOUTH_MOVEMENT_THRESHOLD = 0.015;
+  // Debounce thresholds for speaking detection
+  const SPEAKING_THRESHOLD = 3;
+  const NOT_SPEAKING_THRESHOLD = 5;
 
-  // Helper function to calculate mouth movement
-  const calculateMouthMovement = (currentLandmarks: any[], previousLandmarks: any[]) => {
-    if (!previousLandmarks || previousLandmarks.length === 0) return 0;
-    
-    // Focus specifically on mouth opening/closing landmarks
-    // Upper lip: 13, 14, 312
-    // Lower lip: 17, 15, 16
-    // Corners: 61, 291
-    const upperLipIndices = [13, 14, 312];
-    const lowerLipIndices = [17, 15, 16];
-    const cornerIndices = [61, 291];
-    
-    // Calculate vertical distance between upper and lower lip
-    let verticalMovement = 0;
-    
-    // Get average positions of upper and lower lip
-    let upperLipY = 0;
-    let lowerLipY = 0;
-    
-    upperLipIndices.forEach(index => {
-      if (currentLandmarks[index]) {
-        upperLipY += currentLandmarks[index].y;
-      }
-    });
-    upperLipY /= upperLipIndices.length;
-    
-    lowerLipIndices.forEach(index => {
-      if (currentLandmarks[index]) {
-        lowerLipY += currentLandmarks[index].y;
-      }
-    });
-    lowerLipY /= lowerLipIndices.length;
-    
-    // Current vertical mouth opening
-    const currentMouthOpening = Math.abs(lowerLipY - upperLipY);
-    
-    // Previous vertical mouth opening
-    let prevUpperLipY = 0;
-    let prevLowerLipY = 0;
-    
-    upperLipIndices.forEach(index => {
-      if (previousLandmarks[index]) {
-        prevUpperLipY += previousLandmarks[index].y;
-      }
-    });
-    prevUpperLipY /= upperLipIndices.length;
-    
-    lowerLipIndices.forEach(index => {
-      if (previousLandmarks[index]) {
-        prevLowerLipY += previousLandmarks[index].y;
-      }
-    });
-    prevLowerLipY /= lowerLipIndices.length;
-    
-    const previousMouthOpening = Math.abs(prevLowerLipY - prevUpperLipY);
-    
-    // Calculate change in mouth opening
-    verticalMovement = Math.abs(currentMouthOpening - previousMouthOpening);
-    
-    // Also check horizontal movement of mouth corners
-    let horizontalMovement = 0;
-    cornerIndices.forEach(index => {
-      const current = currentLandmarks[index];
-      const previous = previousLandmarks[index];
-      
-      if (current && previous) {
-        // Focus more on horizontal movement (x) for mouth corners
-        const dx = current.x - previous.x;
-        horizontalMovement += Math.abs(dx);
-      }
-    });
-    
-    // Weight vertical movement more heavily as it's more indicative of speaking
-    return (verticalMovement * 3) + (horizontalMovement * 1);
-  };
-
-  // Helper function to calculate face bounding box from landmarks
-  const calculateFaceBoundingBox = (landmarks: any[]) => {
-    // Use specific landmarks to determine face boundaries
-    // These indices represent points around the face perimeter
-    const faceOutlineIndices = [
-      10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
-      397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
-      172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
-    ];
-    
-    let minX = 1, minY = 1, maxX = 0, maxY = 0;
-    
-    faceOutlineIndices.forEach(index => {
-      if (landmarks[index]) {
-        minX = Math.min(minX, landmarks[index].x);
-        minY = Math.min(minY, landmarks[index].y);
-        maxX = Math.max(maxX, landmarks[index].x);
-        maxY = Math.max(maxY, landmarks[index].y);
-      }
-    });
-    
-    // Add some padding around the face (10%)
-    const width = maxX - minX;
-    const height = maxY - minY;
-    const padding = Math.max(width, height) * 0.15;
-    
-    return {
-      x: Math.max(0, minX - padding),
-      y: Math.max(0, minY - padding),
-      width: Math.min(1 - minX, width + padding * 2),
-      height: Math.min(1 - minY, height + padding * 2)
-    };
-  };
-
-  // Function to handle zoom transitions
-  const updateZoomTransition = () => {
-    const { progress, targetX, targetY, targetScale, startX, startY, startScale } = zoomTransition.current;
-    
-    // Use easing function for smooth transition
-    const easedProgress = progress < 0.5 
-      ? 2 * progress * progress 
-      : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-    
-    // Calculate current position based on transition progress
-    const currentX = startX + (targetX - startX) * easedProgress;
-    const currentY = startY + (targetY - startY) * easedProgress;
-    const currentScale = startScale + (targetScale - startScale) * easedProgress;
-    
-    return { currentX, currentY, currentScale };
-  };
-
-  // onResults callback to draw detected mouth landmarks
+  // onResults callback to detect mouth movement and draw detected mouth landmarks
   const onResults = useCallback((results: any) => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || !videoRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    // Clear previous drawings
+  
+    // Clear the canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
     // Increment frame counter
     frameCounter.current += 1;
-
-    // Find any speaking faces
-    let anySpeaking = false;
-    let speakingFaceIndex = -1;
-    
+  
+    // Default settings
+    let zoom = 1;
+    let faceCenterX = 0;
+    let faceCenterY = 0;
+    let activeSpeaker = -1;
+  
+    // Check if faces are detected
     if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-      // First pass: update speaking status and store face positions
+      // Process each detected face
       results.multiFaceLandmarks.forEach((landmarks: any, faceIndex: number) => {
-        // Calculate and store face bounding box
-        const faceBBox = calculateFaceBoundingBox(landmarks);
-        facePositions.current.set(faceIndex, faceBBox);
-        
         // Get previous landmarks for this face
-        const prevLandmarks = prevMouthPositions.current.get(faceIndex);
+        const previousLandmarks = prevMouthPositions.current.get(faceIndex) || [];
         
-        // Calculate mouth movement if we have previous landmarks
-        let isSpeaking = speakingFaces.current.get(faceIndex) || false;
+        // Calculate mouth movement
+        let mouthMovement = 0;
         
-        if (prevLandmarks) {
-          const movement = calculateMouthMovement(landmarks, prevLandmarks);
+        if (previousLandmarks.length > 0) {
+          // Focus specifically on mouth opening/closing landmarks
+          // Upper lip: 13, 14, 312
+          // Lower lip: 17, 15, 16
+          // Corners: 61, 291
+          const upperLipIndices = [13, 14, 312];
+          const lowerLipIndices = [17, 15, 16];
+          const cornerIndices = [61, 291];
           
-          // Threshold for considering someone is speaking
-          const SPEAKING_THRESHOLD = 0.005;
+          // Calculate vertical distance between upper and lower lip
+          let upperLipY = 0;
+          let lowerLipY = 0;
           
-          // Get current counters or initialize them
-          let speakingCounter = speakingCounters.current.get(faceIndex) || 0;
-          let notSpeakingCounter = notSpeakingCounters.current.get(faceIndex) || 0;
-          
-          // Implement debouncing - require consistent detection before changing state
-          if (movement > SPEAKING_THRESHOLD) {
-            // Increment speaking counter, reset not speaking counter
-            speakingCounter++;
-            notSpeakingCounter = 0;
-            
-            // Only change to speaking state after several consistent detections
-            if (speakingCounter >= 3 && !isSpeaking) {
-              isSpeaking = true;
+          upperLipIndices.forEach(index => {
+            if (landmarks[index]) {
+              upperLipY += landmarks[index].y;
             }
-          } else {
-            // Increment not speaking counter, reset speaking counter
-            notSpeakingCounter++;
-            speakingCounter = 0;
-            
-            // Only change to not speaking state after several consistent detections
-            if (notSpeakingCounter >= 5 && isSpeaking) {
-              isSpeaking = false;
+          });
+          upperLipY /= upperLipIndices.length;
+          
+          lowerLipIndices.forEach(index => {
+            if (landmarks[index]) {
+              lowerLipY += landmarks[index].y;
             }
-          }
+          });
+          lowerLipY /= lowerLipIndices.length;
           
-          // Update counters
-          speakingCounters.current.set(faceIndex, speakingCounter);
-          notSpeakingCounters.current.set(faceIndex, notSpeakingCounter);
+          // Current vertical mouth opening
+          const currentMouthOpening = Math.abs(lowerLipY - upperLipY);
           
-          // Update speaking status
-          speakingFaces.current.set(faceIndex, isSpeaking);
+          // Previous vertical mouth opening
+          let prevUpperLipY = 0;
+          let prevLowerLipY = 0;
           
-          // Track if any face is speaking
-          if (isSpeaking) {
-            anySpeaking = true;
-            speakingFaceIndex = faceIndex;
-          }
+          upperLipIndices.forEach(index => {
+            if (previousLandmarks[index]) {
+              prevUpperLipY += previousLandmarks[index].y;
+            }
+          });
+          prevUpperLipY /= upperLipIndices.length;
+          
+          lowerLipIndices.forEach(index => {
+            if (previousLandmarks[index]) {
+              prevLowerLipY += previousLandmarks[index].y;
+            }
+          });
+          prevLowerLipY /= lowerLipIndices.length;
+          
+          const previousMouthOpening = Math.abs(prevLowerLipY - prevUpperLipY);
+          
+          // Calculate change in mouth opening
+          const verticalMovement = Math.abs(currentMouthOpening - previousMouthOpening);
+          
+          // Also check horizontal movement of mouth corners
+          let horizontalMovement = 0;
+          cornerIndices.forEach(index => {
+            const current = landmarks[index];
+            const previous = previousLandmarks[index];
+            
+            if (current && previous) {
+              // Focus more on horizontal movement (x) for mouth corners
+              const dx = current.x - previous.x;
+              horizontalMovement += Math.abs(dx);
+            }
+          });
+          
+          // Weight vertical movement more heavily as it's more indicative of speaking
+          mouthMovement = (verticalMovement * 3) + (horizontalMovement * 1);
         }
         
         // Store current landmarks for next frame comparison
         prevMouthPositions.current.set(faceIndex, [...landmarks]);
-      });
-      
-      // Update zoom target if needed
-      if (zoomEnabled) {
-        // If we have a speaking face and it's different from current zoom target
-        if (anySpeaking && (currentZoomFace.current !== speakingFaceIndex)) {
-          const faceBBox = facePositions.current.get(speakingFaceIndex);
+        
+        // Initialize counters if they don't exist
+        if (!speakingCounters.current.has(faceIndex)) {
+          speakingCounters.current.set(faceIndex, 0);
+        }
+        if (!notSpeakingCounters.current.has(faceIndex)) {
+          notSpeakingCounters.current.set(faceIndex, 0);
+        }
+        
+        // Get current speaking status
+        let isSpeaking = speakingFaces.current.get(faceIndex) || false;
+        
+        // Update speaking status based on mouth movement with debounce
+        if (mouthMovement > MOUTH_MOVEMENT_THRESHOLD) {
+          // Increment speaking counter and reset not speaking counter
+          speakingCounters.current.set(faceIndex, speakingCounters.current.get(faceIndex)! + 1);
+          notSpeakingCounters.current.set(faceIndex, 0);
           
-          if (faceBBox) {
-            // Calculate center of face
-            const centerX = faceBBox.x + faceBBox.width / 2;
-            const centerY = faceBBox.y + faceBBox.height / 2;
-            
-            // Calculate appropriate zoom scale (inverse of face size)
-            // Smaller faces get zoomed in more
-            const scale = Math.min(2.5, 0.4 / Math.max(faceBBox.width, faceBBox.height));
-            
-            // Start a new transition
-            zoomTransition.current = {
-              progress: 0,
-              targetX: centerX,
-              targetY: centerY,
-              targetScale: scale,
-              startX: zoomTransition.current.targetX,
-              startY: zoomTransition.current.targetY,
-              startScale: zoomTransition.current.targetScale
-            };
-            
-            currentZoomFace.current = speakingFaceIndex;
+          // If speaking counter reaches threshold, mark as speaking
+          if (speakingCounters.current.get(faceIndex)! >= SPEAKING_THRESHOLD) {
+            isSpeaking = true;
           }
-        } 
-        // If no one is speaking and we were zoomed in, transition back to normal view
-        else if (!anySpeaking && currentZoomFace.current !== null) {
-          zoomTransition.current = {
-            progress: 0,
-            targetX: 0.5,
-            targetY: 0.5,
-            targetScale: 1,
-            startX: zoomTransition.current.targetX,
-            startY: zoomTransition.current.targetY,
-            startScale: zoomTransition.current.targetScale
-          };
+        } else {
+          // Increment not speaking counter and reset speaking counter
+          notSpeakingCounters.current.set(faceIndex, notSpeakingCounters.current.get(faceIndex)! + 1);
+          speakingCounters.current.set(faceIndex, 0);
           
-          currentZoomFace.current = null;
+          // If not speaking counter reaches threshold, mark as not speaking
+          if (notSpeakingCounters.current.get(faceIndex)! >= NOT_SPEAKING_THRESHOLD) {
+            isSpeaking = false;
+          }
         }
         
-        // Update transition progress
-        if (zoomTransition.current.progress < 1) {
-          zoomTransition.current.progress = Math.min(1, zoomTransition.current.progress + 0.05);
+        // Update speaking status
+        speakingFaces.current.set(faceIndex, isSpeaking);
+        
+        // If this face is speaking, make it the active speaker for zoom
+        if (isSpeaking && activeSpeaker === -1) {
+          activeSpeaker = faceIndex;
+          
+          // Compute the bounding box of the face
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          landmarks.forEach((landmark: any) => {
+            minX = Math.min(minX, landmark.x);
+            minY = Math.min(minY, landmark.y);
+            maxX = Math.max(maxX, landmark.x);
+            maxY = Math.max(maxY, landmark.y);
+          });
+          
+          // Set the zoom factor when speaking
+          zoom = 1.5; // Adjust as necessary
+          
+          // Compute face center in canvas coordinates
+          faceCenterX = ((minX + maxX) / 2) * canvas.width;
+          faceCenterY = ((minY + maxY) / 2) * canvas.height;
         }
-      }
+      });
+    }
+  
+    // Save the current context state
+    ctx.save();
+  
+    if (activeSpeaker !== -1 && zoom !== 1) {
+      // Apply zoom effect centered on the speaking face
       
-      // Apply zoom transformation to canvas
-      if (zoomEnabled) {
-        const { currentX, currentY, currentScale } = updateZoomTransition();
-        
-        // Save the current state
-        ctx.save();
-        
-        // Clear the canvas
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
-        // Translate to center of canvas
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        
-        // Scale around the center
-        ctx.scale(currentScale, currentScale);
-        
-        // Translate to keep the target point centered
-        ctx.translate(
-          -canvas.width * currentX,
-          -canvas.height * currentY
-        );
-      }
+      // Calculate the scaled dimensions
+      const scaledWidth = canvas.width / zoom;
+      const scaledHeight = canvas.height / zoom;
       
-      // Second pass: draw faces and mouth landmarks
+      // Calculate the top-left corner of the zoomed viewport
+      const sourceX = Math.max(0, faceCenterX - (scaledWidth / 2));
+      const sourceY = Math.max(0, faceCenterY - (scaledHeight / 2));
+      
+      // Ensure we don't go out of bounds
+      const adjustedSourceX = Math.min(sourceX, canvas.width - scaledWidth);
+      const adjustedSourceY = Math.min(sourceY, canvas.height - scaledHeight);
+      
+      // Draw the zoomed portion of the video
+      ctx.drawImage(
+        videoRef.current,
+        adjustedSourceX, adjustedSourceY, scaledWidth, scaledHeight,
+        0, 0, canvas.width, canvas.height
+      );
+    } else {
+      // Draw the normal video frame
+      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    }
+  
+    // Restore context to remove the zoom transformation for overlays
+    ctx.restore();
+  
+    // Draw mouth landmarks and speaking indicators
+    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
       results.multiFaceLandmarks.forEach((landmarks: any, faceIndex: number) => {
-        // Mouth landmark indices
         const mouthIndices = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291];
-        
-        // Get speaking status for this face
-        const isFaceSpeaking = speakingFaces.current.get(faceIndex) || false;
-        
-        // Draw mouth outline
         ctx.beginPath();
         mouthIndices.forEach((index, i) => {
           const landmark = landmarks[index];
@@ -342,30 +233,22 @@ export default function Home() {
           }
         });
         ctx.closePath();
-        
-        // Set color based on speaking status
+        const isFaceSpeaking = speakingFaces.current.get(faceIndex) || false;
         ctx.strokeStyle = isFaceSpeaking ? "red" : "lime";
         ctx.lineWidth = 2;
         ctx.stroke();
-        
-        // Add a label to indicate speaking status
         if (isFaceSpeaking) {
           const mouthTop = landmarks[61];
           const labelX = mouthTop.x * canvas.width;
           const labelY = (mouthTop.y * canvas.height) - 10;
-          
           ctx.font = "16px Arial";
           ctx.fillStyle = "red";
           ctx.fillText("Speaking", labelX - 30, labelY);
         }
       });
-      
-      // Restore canvas state if zoom was applied
-      if (zoomEnabled) {
-        ctx.restore();
-      }
     }
-  }, [zoomEnabled]);
+  }, []);
+  
 
   // Set up camera and Mediapipe FaceMesh pipeline
   useEffect(() => {
@@ -462,24 +345,6 @@ export default function Home() {
       }
     }
   };
-  
-  const toggleZoom = () => {
-    setZoomEnabled(!zoomEnabled);
-    
-    // Reset zoom when disabling
-    if (zoomEnabled) {
-      zoomTransition.current = {
-        progress: 0,
-        targetX: 0.5,
-        targetY: 0.5,
-        targetScale: 1,
-        startX: zoomTransition.current.targetX,
-        startY: zoomTransition.current.targetY,
-        startScale: zoomTransition.current.targetScale
-      };
-      currentZoomFace.current = null;
-    }
-  };
 
   const downloadVideo = () => {
     if (recordedBlob) {
@@ -536,16 +401,6 @@ export default function Home() {
                 } text-white rounded-md transition-colors`}
               >
                 {audioEnabled ? "Mic On" : "Mic Off"}
-              </button>
-              <button
-                onClick={toggleZoom}
-                className={`px-4 py-2 ${
-                  zoomEnabled
-                    ? "bg-indigo-500 hover:bg-indigo-600"
-                    : "bg-gray-500 hover:bg-gray-600"
-                } text-white rounded-md transition-colors`}
-              >
-                {zoomEnabled ? "Zoom On" : "Zoom Off"}
               </button>
             </>
           ) : (
