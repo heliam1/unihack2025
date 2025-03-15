@@ -13,17 +13,11 @@ export default function Home() {
   const chunks = useRef<Blob[]>([]);
   
   // Add refs to track previous mouth positions and speaking status
-  const prevMouthPositions = useRef<Map<number, any[]>>(new Map());
   const speakingFaces = useRef<Map<number, boolean>>(new Map());
-  const frameCounter = useRef<number>(0);
-  // Add debounce counters for each face
-  const speakingCounters = useRef<Map<number, number>>(new Map());
-  const notSpeakingCounters = useRef<Map<number, number>>(new Map());
-  // Threshold for mouth movement to be considered speaking
-  const MOUTH_MOVEMENT_THRESHOLD = 0.015;
-  // Debounce thresholds for speaking detection
-  const SPEAKING_THRESHOLD = 3;
-  const NOT_SPEAKING_THRESHOLD = 5;
+
+  // Threshold for mouth opening to be considered speaking - larger value means mouth needs to be more open
+  // This is 1.5% of the total height of the face
+  const MOUTH_OPENING_THRESHOLD = 0.020;
 
   // onResults callback to detect mouth movement and draw detected mouth landmarks
   const onResults = useCallback((results: any) => {
@@ -34,9 +28,6 @@ export default function Home() {
   
     // Clear the canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Increment frame counter
-    frameCounter.current += 1;
   
     // Default settings
     let zoom = 1;
@@ -48,22 +39,17 @@ export default function Home() {
     if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
       // Process each detected face
       results.multiFaceLandmarks.forEach((landmarks: any, faceIndex: number) => {
-        // Get previous landmarks for this face
-        const previousLandmarks = prevMouthPositions.current.get(faceIndex) || [];
+        // Focus specifically on mouth opening/closing landmarks
+        // Upper lip: 13, 14, 312
+        // Lower lip: 17, 15, 16
+        const upperLipIndices = [13, 14, 312];
+        const lowerLipIndices = [17, 15, 16];
         
-        // Calculate mouth movement
-        let mouthMovement = 0;
+        // Calculate lip distance (mouth opening)
+        let lipDistance = 0;
         
-        if (previousLandmarks.length > 0) {
-          // Focus specifically on mouth opening/closing landmarks
-          // Upper lip: 13, 14, 312
-          // Lower lip: 17, 15, 16
-          // Corners: 61, 291
-          const upperLipIndices = [13, 14, 312];
-          const lowerLipIndices = [17, 15, 16];
-          const cornerIndices = [61, 291];
-          
-          // Calculate vertical distance between upper and lower lip
+        if (landmarks.length > 0) {
+          // Calculate current vertical distance between upper and lower lip
           let upperLipY = 0;
           let lowerLipY = 0;
           
@@ -82,82 +68,13 @@ export default function Home() {
           lowerLipY /= lowerLipIndices.length;
           
           // Current vertical mouth opening
-          const currentMouthOpening = Math.abs(lowerLipY - upperLipY);
-          
-          // Previous vertical mouth opening
-          let prevUpperLipY = 0;
-          let prevLowerLipY = 0;
-          
-          upperLipIndices.forEach(index => {
-            if (previousLandmarks[index]) {
-              prevUpperLipY += previousLandmarks[index].y;
-            }
-          });
-          prevUpperLipY /= upperLipIndices.length;
-          
-          lowerLipIndices.forEach(index => {
-            if (previousLandmarks[index]) {
-              prevLowerLipY += previousLandmarks[index].y;
-            }
-          });
-          prevLowerLipY /= lowerLipIndices.length;
-          
-          const previousMouthOpening = Math.abs(prevLowerLipY - prevUpperLipY);
-          
-          // Calculate change in mouth opening
-          const verticalMovement = Math.abs(currentMouthOpening - previousMouthOpening);
-          
-          // Also check horizontal movement of mouth corners
-          let horizontalMovement = 0;
-          cornerIndices.forEach(index => {
-            const current = landmarks[index];
-            const previous = previousLandmarks[index];
-            
-            if (current && previous) {
-              // Focus more on horizontal movement (x) for mouth corners
-              const dx = current.x - previous.x;
-              horizontalMovement += Math.abs(dx);
-            }
-          });
-          
-          // Weight vertical movement more heavily as it's more indicative of speaking
-          mouthMovement = (verticalMovement * 3) + (horizontalMovement * 1);
+          lipDistance = Math.abs(lowerLipY - upperLipY);
         }
         
-        // Store current landmarks for next frame comparison
-        prevMouthPositions.current.set(faceIndex, [...landmarks]);
-        
-        // Initialize counters if they don't exist
-        if (!speakingCounters.current.has(faceIndex)) {
-          speakingCounters.current.set(faceIndex, 0);
-        }
-        if (!notSpeakingCounters.current.has(faceIndex)) {
-          notSpeakingCounters.current.set(faceIndex, 0);
-        }
-        
-        // Get current speaking status
-        let isSpeaking = speakingFaces.current.get(faceIndex) || false;
-        
-        // Update speaking status based on mouth movement with debounce
-        if (mouthMovement > MOUTH_MOVEMENT_THRESHOLD) {
-          // Increment speaking counter and reset not speaking counter
-          speakingCounters.current.set(faceIndex, speakingCounters.current.get(faceIndex)! + 1);
-          notSpeakingCounters.current.set(faceIndex, 0);
-          
-          // If speaking counter reaches threshold, mark as speaking
-          if (speakingCounters.current.get(faceIndex)! >= SPEAKING_THRESHOLD) {
-            isSpeaking = true;
-          }
-        } else {
-          // Increment not speaking counter and reset speaking counter
-          notSpeakingCounters.current.set(faceIndex, notSpeakingCounters.current.get(faceIndex)! + 1);
-          speakingCounters.current.set(faceIndex, 0);
-          
-          // If not speaking counter reaches threshold, mark as not speaking
-          if (notSpeakingCounters.current.get(faceIndex)! >= NOT_SPEAKING_THRESHOLD) {
-            isSpeaking = false;
-          }
-        }
+        // Determine speaking status directly based on lip distance
+        // If lip distance exceeds threshold, consider as speaking
+        // A larger lip distance means mouth is open
+        const isSpeaking = lipDistance > MOUTH_OPENING_THRESHOLD;
         
         // Update speaking status
         speakingFaces.current.set(faceIndex, isSpeaking);
@@ -249,7 +166,6 @@ export default function Home() {
     }
   }, []);
   
-
   // Set up camera and Mediapipe FaceMesh pipeline
   useEffect(() => {
     async function setupCameraAndMediapipe() {
@@ -276,8 +192,8 @@ export default function Home() {
           // TODO: diff model to dynamically change/detect faces
           maxNumFaces: 5,
           refineLandmarks: true,
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minDetectionConfidence: 0.8,
+          minTrackingConfidence: 0.8,
         });
         faceMesh.onResults(onResults);
 
